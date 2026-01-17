@@ -168,9 +168,21 @@ export class MailboxDO extends DurableObject {
     this.env = env;
     this.connections = new Map();
     this.latest = null;
+    this.pending = [];
 
     this.ready = this.ctx.blockConcurrencyWhile(async () => {
       this.latest = await this.ctx.storage.get("latest");
+      this.pending = (await this.ctx.storage.get("pending")) || [];
+      if (!Array.isArray(this.pending)) this.pending = [];
+      this.pending = this.pending
+        .filter((x) => x && typeof x === "object")
+        .map((x) => ({
+          clipId: typeof x.clipId === "string" ? x.clipId : "",
+          expiresAt: Number.isFinite(x.expiresAt) ? x.expiresAt : Number(x.expiresAt) || 0,
+          keys: Array.isArray(x.keys) ? x.keys.filter((k) => typeof k === "string") : [],
+        }))
+        .filter((x) => x.clipId && x.expiresAt > 0 && x.keys.length);
+
       await this._cleanupIfExpired();
     });
   }
@@ -190,6 +202,42 @@ export class MailboxDO extends DurableObject {
   async alarm() {
     await this.ready;
     await this._cleanupIfExpired(true);
+  }
+
+  _validR2Key(k) {
+    return typeof k === "string" && k.startsWith(KEY_PREFIX) && !k.includes("..") && k.length < 512;
+  }
+
+  _collectKeysFromClip(clip) {
+    const out = [];
+    const parts = clip?.parts || [];
+    for (const p of parts) {
+      const k = p?.r2Key;
+      if (this._validR2Key(k)) out.push(k);
+    }
+    return [...new Set(out)];
+  }
+
+  async _deleteR2Keys(keys) {
+    const safe = (keys || []).filter((k) => this._validR2Key(k));
+    if (!safe.length) return;
+    await Promise.allSettled(safe.map((k) => this.env.CLIP_BUCKET.delete(k)));
+  }
+
+  _nextAlarmAt() {
+    const times = [];
+    if (this.latest?.expiresAt) times.push(this.latest.expiresAt);
+    for (const x of this.pending) {
+      if (x?.expiresAt) times.push(x.expiresAt);
+    }
+    if (!times.length) return null;
+    return Math.min(...times);
+  }
+
+  async _syncAlarm() {
+    const next = this._nextAlarmAt();
+    if (next) await this.ctx.storage.setAlarm(next);
+    else await this.ctx.storage.deleteAlarm();
   }
 
   async _handleWS(request) {
@@ -279,15 +327,38 @@ export class MailboxDO extends DurableObject {
         );
       });
 
-    const expiresAt = Date.now() + TTL_MS;
-    this.latest = { clip, expiresAt };
+    for (const p of clip.parts) {
+      if (p.kind === "image" && typeof p.mime === "string") {
+        if (p.mime.toLowerCase().includes("image/svg+xml")) return err(400, "SVG images are not allowed.");
+      }
+    }
 
-    await this.ctx.storage.put("latest", this.latest);
-    await this.ctx.storage.setAlarm(expiresAt);
+    return await this.ctx.blockConcurrencyWhile(async () => {
+      const now = Date.now();
 
-    this._broadcast({ type: "clip", clip, expiresAt });
+      const prev = this.latest;
+      if (prev?.clip?.id && prev?.expiresAt) {
+        const keys = this._collectKeysFromClip(prev.clip);
+        if (keys.length) {
+          if (prev.expiresAt <= now) {
+            await this._deleteR2Keys(keys);
+          } else {
+            this.pending.push({ clipId: prev.clip.id, expiresAt: prev.expiresAt, keys });
+            await this.ctx.storage.put("pending", this.pending);
+          }
+        }
+      }
 
-    return ok({ stored: true, expiresAt });
+      const expiresAt = now + TTL_MS;
+      this.latest = { clip, expiresAt };
+
+      await this.ctx.storage.put("latest", this.latest);
+      await this._syncAlarm();
+
+      this._broadcast({ type: "clip", clip, expiresAt });
+
+      return ok({ stored: true, expiresAt });
+    });
   }
 
   async _handleDelete(request) {
@@ -300,22 +371,33 @@ export class MailboxDO extends DurableObject {
     }
 
     await this._deleteLatest("manual");
+    await this._syncAlarm();
     return ok({ deleted: true });
   }
 
   async _cleanupIfExpired(fromAlarm = false) {
-    if (!this.latest) return;
-
     const now = Date.now();
-    if (this.latest.expiresAt && this.latest.expiresAt <= now) {
-      await this._deleteLatest(fromAlarm ? "ttl-alarm" : "ttl");
-      return;
+
+    if (this.pending?.length) {
+      const due = [];
+      const keep = [];
+      for (const x of this.pending) {
+        if (x?.expiresAt && x.expiresAt <= now) due.push(x);
+        else keep.push(x);
+      }
+      if (due.length) {
+        const keys = due.flatMap((x) => x.keys || []);
+        await this._deleteR2Keys(keys);
+        this.pending = keep;
+        await this.ctx.storage.put("pending", this.pending);
+      }
     }
 
-    const currentAlarm = await this.ctx.storage.getAlarm();
-    if (!currentAlarm && this.latest.expiresAt) {
-      await this.ctx.storage.setAlarm(this.latest.expiresAt);
+    if (this.latest?.expiresAt && this.latest.expiresAt <= now) {
+      await this._deleteLatest(fromAlarm ? "ttl-alarm" : "ttl");
     }
+
+    await this._syncAlarm();
   }
 
   async _deleteLatest(reason) {
@@ -323,18 +405,9 @@ export class MailboxDO extends DurableObject {
     this.latest = null;
 
     await this.ctx.storage.delete("latest");
-    await this.ctx.storage.deleteAlarm();
 
-    const keys = [];
-    const parts = latest?.clip?.parts || [];
-    for (const p of parts) {
-      if (p && typeof p.r2Key === "string" && p.r2Key.startsWith(KEY_PREFIX)) {
-        keys.push(p.r2Key);
-      }
-    }
-    if (keys.length) {
-      await Promise.allSettled(keys.map((k) => this.env.CLIP_BUCKET.delete(k)));
-    }
+    const keys = this._collectKeysFromClip(latest?.clip);
+    await this._deleteR2Keys(keys);
 
     this._broadcast({ type: "deleted", clipId: latest?.clip?.id, reason });
   }
