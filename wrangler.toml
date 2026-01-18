@@ -1,8 +1,13 @@
 name = "netclipboard"
 main = "src/index.js"
 compatibility_date = "2026-01-17"
-workers_dev = true
+workers_dev = false
+preview_urls = false
 minify = true
+
+[[routes]]
+pattern = "clip.us.ci"
+custom_domain = true
 
 [[r2_buckets]]
 binding = "CLIP_BUCKET"
