@@ -166,7 +166,6 @@ export class MailboxDO extends DurableObject {
     super(ctx, env);
     this.ctx = ctx;
     this.env = env;
-    this.connections = new Map();
     this.latest = null;
     this.pending = [];
 
@@ -203,6 +202,24 @@ export class MailboxDO extends DurableObject {
     await this.ready;
     await this._cleanupIfExpired(true);
   }
+
+  async webSocketMessage(ws, message) {
+    await this.ready;
+    try {
+      const text =
+        typeof message === "string" ? message : new TextDecoder().decode(new Uint8Array(message));
+      const msg = JSON.parse(text);
+      if (msg?.type === "ping") ws.send(JSON.stringify({ type: "pong", now: Date.now() }));
+    } catch {}
+  }
+
+  async webSocketClose(ws, code, reason, wasClean) {
+    try {
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CLOSING) ws.close(code, reason);
+    } catch {}
+  }
+
+  async webSocketError(ws, error) {}
 
   _validR2Key(k) {
     return typeof k === "string" && k.startsWith(KEY_PREFIX) && !k.includes("..") && k.length < 512;
@@ -247,29 +264,23 @@ export class MailboxDO extends DurableObject {
 
     const url = new URL(request.url);
     const deviceId = url.searchParams.get("device") || crypto.randomUUID();
+    const tag = `device:${deviceId}`;
+
+    const old = this.ctx.getWebSockets(tag);
+    for (const ws of old) {
+      try {
+        ws.close(1000, "replaced");
+      } catch {}
+    }
 
     const pair = new WebSocketPair();
     const client = pair[0];
     const server = pair[1];
 
-    server.accept();
-    this.connections.set(deviceId, server);
-
-    const drop = () => {
-      try {
-        server.close();
-      } catch {}
-      this.connections.delete(deviceId);
-    };
-
-    server.addEventListener("close", drop);
-    server.addEventListener("error", drop);
-    server.addEventListener("message", (evt) => {
-      try {
-        const msg = JSON.parse(evt.data);
-        if (msg?.type === "ping") server.send(JSON.stringify({ type: "pong", now: Date.now() }));
-      } catch {}
-    });
+    this.ctx.acceptWebSocket(server, [tag]);
+    try {
+      server.serializeAttachment({ deviceId });
+    } catch {}
 
     server.send(JSON.stringify({ type: "hello", deviceId, now: Date.now() }));
 
@@ -414,15 +425,10 @@ export class MailboxDO extends DurableObject {
 
   _broadcast(obj) {
     const msg = JSON.stringify(obj);
-    for (const [deviceId, ws] of this.connections.entries()) {
+    for (const ws of this.ctx.getWebSockets()) {
       try {
         ws.send(msg);
-      } catch {
-        try {
-          ws.close();
-        } catch {}
-        this.connections.delete(deviceId);
-      }
+      } catch {}
     }
   }
 }
