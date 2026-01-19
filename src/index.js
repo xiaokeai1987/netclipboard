@@ -622,8 +622,16 @@ const INDEX_HTML = `<!doctype html>
     </div>
 
     <div class="mt-4 text-xs opacity-70 leading-relaxed">
-      建議：敏感內容請填加密口令。內容會在瀏覽器端加密後才上傳，Cloudflare 看不到內容明文，但仍可看到檔名/大小/時間等中繼資料。<br/>
-      所有文件 15 分鐘到期自動刪除，或寄件人/收件人可點選立即刪除。
+      建議：敏感內容請填加密口令，內容會在瀏覽器端加密後才上傳，Cloudflare 看不到內容明文，但仍可看到檔名/大小/時間等中繼資料。所有文件 15 分鐘到期自動刪除，或寄件人/收件人可點選立即刪除。
+    </div>
+
+    <div class="mt-6 pt-6 border-t border-[color:var(--md-outline)] text-center text-xs opacity-60">
+      <p>
+        A secure, serverless cross-device temporary clipboard powered by 
+        <a href="https://github.com/Naoar1/netclipboard" target="_blank" class="underline hover:opacity-100">netclipboard</a>, 
+        made with <span class="text-red-500">❤</span> by 
+        <a href="https://github.com/Naoar1" target="_blank" class="underline hover:opacity-100">Naoar1</a>.
+      </p>
     </div>
   </div>
 
