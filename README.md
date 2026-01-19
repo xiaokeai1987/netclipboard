@@ -18,7 +18,7 @@ Content is automatically deleted after 15 minutes.
 
 - **Secure Data Transfer**: Use end-to-end encryption to safely transmit passwords or credentials.
 
-- **Temp File Sharing**: Instantly share images in a meeting or classroom via a code, without installing apps or adding friends.
+- **Temp File Sharing**: Instantly share images in a meeting or classroom to all members via a code, without installing apps or adding friends.
 
 ## 📌 FAQ
 ### Architecture
