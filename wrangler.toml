@@ -6,7 +6,7 @@ preview_urls = false
 minify = true
 
 [[routes]]
-pattern = "clip.us.ci"
+pattern = "clip.2api.ccwu.cc"
 custom_domain = true
 
 [[r2_buckets]]
